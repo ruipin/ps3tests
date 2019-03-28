@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <cell/sysmodule.h>
 #include <cell/atomic.h>
+#include <sys/return_code.h>
 #include <sys/ppu_thread.h>
 #include <sys/timer.h>
 #include <sys/memory.h>
@@ -27,18 +28,34 @@ typedef int32_t s32;
 typedef int16_t s16;
 typedef int8_t s8;
 
+typedef u32 error_code;
+
 
 /*
  * Helper macros
  */
 #define ERROR_EXIT(x) do { \
-		if (u64 err = (x) != CELL_OK) { \
-			printf("Failure! err=0x%lx\n", err); \
+		u32 err; \
+		if ((err = (u32)(x)) != (u64)CELL_OK) { \
+			printf("Failure! err=0x%x\n", err); \
+			exit(-1); \
+		} \
+	} while(0)
+
+#define EXPECT_ERROR(_expected, x) do { \
+		u32 err; \
+		if ((err = (u32)(x)) != (u32)(_expected)) { \
+			printf("Failure! err=0x%x, expected=0x%x\n", err, (u32)(_expected)); \
 			exit(-1); \
 		} \
 	} while(0)
 
 #define INFO(msg, ...) printf("%llu: " msg "\n", (get_time()-_start_time)/1000, ##__VA_ARGS__); 
+
+#define PRINT_RET(x) do { \
+		u32 err = (u32)(x); \
+		INFO(#x " -> 0x%x", err); \
+	} while(0)
 
 #define SYSCALL(n, name, ...) \
 	static __attribute__((noinline)) error_code name(__VA_ARGS__) { \

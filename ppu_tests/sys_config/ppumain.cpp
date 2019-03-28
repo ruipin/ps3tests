@@ -10,7 +10,6 @@ SYS_PROCESS_PARAM(1000, 0x10000)
 
 static u64 _start_time;
 
-typedef u32 error_code;
 typedef u32 sys_config_t;
 typedef u32 sys_config_listener_t;
 typedef u32 sys_config_service_t;
@@ -20,9 +19,10 @@ typedef struct sys_config_service_event_t {
 	u32 service_listener_handle; // describes the listener this config event is for
 	u32 event_added; // 1 if this is a notification that a config event was added; 0 if the config event was removed
 	u64 service_id; // describes the service that sent this config event
-	u64 data1; // 'c' parameter supplied to sys_config_register_service
+	u64 data1; // 'data1' parameter supplied to sys_config_register_service.
+	           // This is used to distinguish which event was removed when services get unregistered, so should probably be "unique" - or to be exact, you should never register two services with the same ID
 	/* if event_added==0, the following fields will not be present */
-	u64 data2; // 'd' parameter supplied to sys_config_register_service
+	u64 verbosity; // 'verbosity' parameter supplied to sys_config_register_service
 	u64 buf_size; // size of 'buf' supplied to sys_config_register_service
 	u32 padding; // not 100% sure (sometimes non-zero), haven't been able to find any place where this is written to and/or read from
 	u8 buf[256]; // 'buf' supplied to sys_config_register_service
@@ -37,9 +37,9 @@ typedef struct sys_config_service_event_t {
 SYSCALL(516, sys_config_open                         , sys_event_queue_t equeue_id, sys_config_t *out_handle)
 SYSCALL(517, sys_config_close                        , sys_config_t config)
 SYSCALL(518, sys_config_get_service_event            , sys_config_t config, u32 event_id, void* dst, u64 size)
-SYSCALL(519, sys_config_add_service_listener         , sys_config_t config, s64 service_id, u32 flag1, void *in, u32 size, u32 flag2, sys_config_listener_t *out_listener)
+SYSCALL(519, sys_config_add_service_listener         , sys_config_t config, s64 service_id, u64 verbosity, void *in, u64 size, u32 repeating, sys_config_listener_t *out_listener)
 SYSCALL(520, sys_config_remove_service_listener      , sys_config_t config, sys_config_listener_t listener)
-SYSCALL(521, sys_config_register_service             , sys_config_t config, s64 service_id, u64 data1, u64 data2, void *data_buf, u32 size, sys_config_service_t *out_service)
+SYSCALL(521, sys_config_register_service             , sys_config_t config, s64 service_id, u64 data1 /* user identifier */, u64 min_verbosity, void *data_buf, u64 size, sys_config_service_t *out_service)
 SYSCALL(522, sys_config_unregister_service           , sys_config_t config, sys_config_service_t service)
 //SYSCALL(523, sys_config_io_event                     , ...)
 //SYSCALL(524, sys_config_register_io_error_listener   , ...)
@@ -56,6 +56,7 @@ SYSCALL(522, sys_config_unregister_service           , sys_config_t config, sys_
 static sys_ppu_thread_t tids[NUM_LISTENER_THREADS];
 
 #define SERVICE_1 0x8000000000010001ll
+#define SERVICE_2 0x8000000000010011ll
 
 static sys_config_t configs[NUM_LISTENER_THREADS];
 static sys_event_queue_t equeues[NUM_LISTENER_THREADS];
@@ -69,11 +70,11 @@ static sys_config_listener_t listeners[NUM_LISTENER_HANDLES];
 /*
  * Utilities
  */
-sys_config_service_t register_service(int config_num, s64 service_id, u64 data1, u64 data2, void *data_buf, u32 size) {
+sys_config_service_t register_service(int config_num, s64 service_id, u64 data1, u64 verbosity, void *data_buf, u32 size) {
 	sys_config_service_t service;
 
-	ERROR_EXIT(sys_config_register_service(configs[config_num], service_id, data1, data2, data_buf, size, &service));
-	INFO("REGISTERED: service 0x%x => config=0x%x (num=%d), sid=0x%llx, data1=0x%llx, data2=0x%llx, buf_size=%u", (u32)service, (u32)configs[config_num], config_num, service_id, data1, data2, size);
+	ERROR_EXIT(sys_config_register_service(configs[config_num], service_id, data1, verbosity, data_buf, size, &service));
+	INFO("REGISTERED: service 0x%x => config=0x%x (num=%d), sid=0x%llx, data1=0x%llx, verbosity=0x%llx, buf_size=%u", (u32)service, (u32)configs[config_num], config_num, service_id, data1, verbosity, size);
 
 	return service;
 }
@@ -86,11 +87,11 @@ void unregister_service(int config_num, int service_num) {
 	INFO("UNREGISTERED: service 0x%x (num=%d) from config=0x%x (num=%d)", (u32)service, service_num, (u32)config, config_num); 
 }
 
-sys_config_listener_t add_listener(int config_num, s64 service_id, u32 flag1, u32 flag2, void *data_buf, u32 size) {
+sys_config_listener_t add_listener(int config_num, s64 service_id, u32 min_verbosity, u32 repeating, void *data_buf, u32 size) {
 	sys_config_listener_t listener;
 
-	ERROR_EXIT(sys_config_add_service_listener(configs[config_num], service_id, flag1, data_buf, size, flag2, &listener));
-	INFO("ADDED: listener 0x%x => config=0x%x (num=%d), sid=0x%llx, flag1=0x%llx, flag2=0x%llx, buf_size=%u", (u32)listener, (u32)configs[config_num], config_num, service_id, flag1, flag2, size);
+	ERROR_EXIT(sys_config_add_service_listener(configs[config_num], service_id, min_verbosity, data_buf, size, repeating, &listener));
+	INFO("ADDED: listener 0x%x => config=0x%x (num=%d), sid=0x%llx, min_verbosity=0x%llx, repeating=%u, buf_size=%u", (u32)listener, (u32)configs[config_num], config_num, service_id, min_verbosity, repeating, size);
 
 	return listener;
 }
@@ -127,11 +128,14 @@ void print_service(u64 tid, u32 event_id, sys_config_service_event_t *sev) {
 	cur += sprintf(cur, "\tlistener= 0x%llx    added= %d\n", sev->service_listener_handle, sev->event_added);
 	cur += sprintf(cur, "\tservice_id= 0x%llx\n", sev->service_id);
 	cur += sprintf(cur, "\tdata1= 0x%llx\n", sev->data1);
-	cur += sprintf(cur, "\tdata2= 0x%llx\n", sev->data2);
-	cur += sprintf(cur, "\tbuf_size= 0x%x\n", sev->buf_size);
-	cur += sprintf(cur, "\tpadding= 0x%x\n", sev->padding);
-	cur += sprintf(cur, "\tbuf= ", sev->buf_size);
-	cur += dump_to_string(sev->buf, cur, sev->buf_size);
+
+	if(sev->event_added) {
+		cur += sprintf(cur, "\tverbosity= 0x%llx\n", sev->verbosity);
+		cur += sprintf(cur, "\tbuf_size= 0x%x\n", sev->buf_size);
+		cur += sprintf(cur, "\tpadding= 0x%x\n", sev->padding);
+		cur += sprintf(cur, "\tbuf= ", sev->buf_size);
+		cur += dump_to_string(sev->buf, cur, sev->buf_size);
+	}
 
 	INFO("%s", buf);
 }
@@ -202,23 +206,65 @@ int main()
 	sys_timer_sleep(1);
 
 	// Register the first listener
-	listeners[0] = add_listener(0, SERVICE_1, 1, 1, NULL, 0);
+	listeners[0] = add_listener(0, SERVICE_1, 0x1c, 1, NULL, 0);
+
+	// Register service(s) with illegal handle
+	EXPECT_ERROR(ESRCH, sys_config_register_service(0xdeadbeef, SERVICE_1, 0x0a, 0x0b, NULL, 0, &services[4]));
+	EXPECT_ERROR(EINVAL, sys_config_register_service(CFG0, 0x11, 0x0c, 0x0d, NULL, 0, &services[4]));
 
 	// Register first service
 	services[0] = register_service(CFG0, SERVICE_1, 0x1a, 0x1b, NULL, 0);
 	services[1] = register_service(CFG0, SERVICE_1, 0x2a, 0x2b, NULL, 0);
 	services[2] = register_service(CFG0, SERVICE_1, 0x3a, 0x3b, NULL, 0);
+	services[3] = register_service(CFG0, SERVICE_1, 0x4a, 0x4b, NULL, 0);
 
+	// Unregister service 1
+	unregister_service(CFG0, 2);
 	sys_timer_sleep(1);
-	unregister_service(CFG1, 1);
+
+	// Close config 0 (twice)
+	ERROR_EXIT(sys_config_close(configs[0]));
+	sys_timer_sleep(1);
+	EXPECT_ERROR(ESRCH, sys_config_close(configs[0]));
+	remove_listener(CFG0, 0); // weirdly succeeds
 	sys_timer_sleep(1);
 
 	// Register the second listener
 	listeners[1] = add_listener(CFG1, SERVICE_1, 1, 1, NULL, 0);
 	sys_timer_sleep(1);
-	remove_listener(CFG0, 1);
 
-	sys_timer_sleep(5);
+	// Unregister service 2
+	unregister_service(CFG1, 2);
+	sys_timer_sleep(1);
+
+	// Remove listener twice
+	EXPECT_ERROR(ESRCH, sys_config_remove_service_listener(configs[1], listeners[0]));
+	EXPECT_ERROR(ESRCH, sys_config_remove_service_listener(configs[1], 0xdeadbeef));
+	
+	// Try weird behaviour
+	{
+		sys_config_t config;
+		sys_config_listener_t listener;
+		PRINT_RET(sys_config_open(equeues[0], &config));
+		PRINT_RET(sys_config_add_service_listener(config, SERVICE_2, 1, NULL, 0, 1, &listener));
+		PRINT_RET(sys_config_close(config));
+		sys_timer_sleep(1);
+		PRINT_RET(sys_config_remove_service_listener(config, listener));
+	}
+
+	{
+		sys_config_t config;
+		sys_config_listener_t listener;
+		PRINT_RET(sys_config_open(equeues[0], &config));
+		PRINT_RET(sys_config_add_service_listener(config, SERVICE_2, 1, NULL, 0, 0, &listener));
+		PRINT_RET(sys_config_register_service(config, SERVICE_2, 0x1, 0x1, NULL, 0, &services[4]));
+		PRINT_RET(sys_config_register_service(config, SERVICE_2, 0x1, 0x1, NULL, 0, &services[5]));
+		sys_timer_sleep(1);
+		PRINT_RET(sys_config_remove_service_listener(config, listener));
+		PRINT_RET(sys_config_close(config));
+	}
+
+	sys_timer_sleep(10);
 
 	return 0;
 }
