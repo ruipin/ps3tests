@@ -1,0 +1,10 @@
+yay
+<%= hello_world %>
+It is now <%= Time.now %>
+Seed = <%= options[:seed] %>
+Options = <%= options %>
+<%
+  r = rand(UINT_MIN..UINT_MAX)
+%>
+Random int: <%= r %> (hex= <%= r.to_s(16) %>)
+Reinterpreted as float: <%= reinterpret_float(r) %> (hex= <%= float_to_hex(reinterpret_float(r)) %>)
