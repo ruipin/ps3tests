@@ -23,7 +23,7 @@ typedef struct sys_config_service_event_t {
 	           // This is used to distinguish which event was removed when services get unregistered, so should probably be "unique" - or to be exact, you should never register two services with the same ID
 	/* if event_added==0, the following fields will not be present */
 	u64 verbosity; // 'verbosity' parameter supplied to sys_config_register_service
-	u64 buf_size; // size of 'buf' supplied to sys_config_register_service
+	u32 buf_size; // size of 'buf' supplied to sys_config_register_service
 	u32 padding; // not 100% sure (sometimes non-zero), haven't been able to find any place where this is written to and/or read from
 	u8 buf[256]; // 'buf' supplied to sys_config_register_service
 } sys_config_service_event_t;
@@ -133,7 +133,7 @@ void print_service(u64 tid, u32 event_id, sys_config_service_event_t *sev) {
 		cur += sprintf(cur, "\tverbosity= 0x%llx\n", sev->verbosity);
 		cur += sprintf(cur, "\tbuf_size= 0x%x\n", sev->buf_size);
 		cur += sprintf(cur, "\tpadding= 0x%x\n", sev->padding);
-		cur += sprintf(cur, "\tbuf= ", sev->buf_size);
+		cur += sprintf(cur, "\tbuf= ");
 		cur += dump_to_string(sev->buf, cur, sev->buf_size);
 	}
 
